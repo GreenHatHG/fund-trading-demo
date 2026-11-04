@@ -156,12 +156,11 @@ func (d *DB) RetryJob(ctx context.Context, id int64, attempts, maxAttempts int) 
 	return err
 }
 
-// ClaimTimeoutOrders flips stale SUBMITTED orders (no downstream answer) to UNKNOWN.
-func (d *DB) ClaimTimeoutOrders(ctx context.Context, olderThan time.Duration, limit int) ([]int64, error) {
+// StaleSubmittedOrders lists SUBMITTED orders with no downstream answer recently.
+// It only READS; the state write stays in ordercore.Transition (hard constraint).
+func (d *DB) StaleSubmittedOrders(ctx context.Context, olderThan time.Duration, limit int) ([]int64, error) {
 	rows, err := d.Pool.Query(ctx,
-		`UPDATE orders SET state='UNKNOWN', version=version+1, updated_at=now()
-		 WHERE id IN (SELECT id FROM orders WHERE state='SUBMITTED' AND updated_at < now()-make_interval(secs=>$1) LIMIT $2)
-		 RETURNING id`, olderThan.Seconds(), limit)
+		`SELECT id FROM orders WHERE state='SUBMITTED' AND updated_at < now()-make_interval(secs=>$1) LIMIT $2`, olderThan.Seconds(), limit)
 	if err != nil {
 		return nil, err
 	}

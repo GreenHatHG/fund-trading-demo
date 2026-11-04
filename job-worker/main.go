@@ -100,7 +100,7 @@ func (wk *worker) runOnce(ctx context.Context) {
 		}
 	}
 	// Sweep: SUBMITTED orders with no downstream answer for too long -> UNKNOWN.
-	ids, err := wk.db.ClaimTimeoutOrders(ctx, 5*time.Second, 100)
+	ids, err := wk.db.StaleSubmittedOrders(ctx, 5*time.Second, 100)
 	if err != nil {
 		wk.log.Error("claim timeout orders", "err", err)
 		return
