@@ -80,6 +80,8 @@ func (wk *worker) transition(ctx context.Context, orderID int64, from, to orderc
 }
 
 func (wk *worker) runOnce(ctx context.Context) {
+	// Sweep first so an idle queue still advances stale SUBMITTED orders.
+	wk.sweepStaleSubmits(ctx)
 	for i := 0; i < 10; i++ {
 		id, orderID, jobType, attempts, maxAttempts, err := wk.db.ClaimNextJob(ctx)
 		if err != nil || id == 0 {
@@ -99,7 +101,9 @@ func (wk *worker) runOnce(ctx context.Context) {
 			_ = wk.db.FinishJob(ctx, id, false)
 		}
 	}
-	// Sweep: SUBMITTED orders with no downstream answer for too long -> UNKNOWN.
+}
+
+func (wk *worker) sweepStaleSubmits(ctx context.Context) {
 	ids, err := wk.db.StaleSubmittedOrders(ctx, 5*time.Second, 100)
 	if err != nil {
 		wk.log.Error("claim timeout orders", "err", err)
