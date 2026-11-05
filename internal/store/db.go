@@ -160,17 +160,19 @@ func (d *DB) RetryJob(ctx context.Context, id int64, attempts, maxAttempts int) 
 		return err
 	}
 	backoff := time.Duration(1<<uint(attempts)) * time.Second
+	runAfter := time.Now().Add(backoff)
 	_, err := d.Pool.Exec(ctx,
-		`UPDATE jobs SET state='PENDING', run_after=now()+make_interval(secs=>$1), updated_at=now() WHERE id=$2`,
-		backoff.Seconds(), id)
+		`UPDATE jobs SET state='PENDING', run_after=$1, updated_at=now() WHERE id=$2`,
+		runAfter, id)
 	return err
 }
 
 // StaleSubmittedOrders lists SUBMITTED orders with no downstream answer recently.
 // It only READS; the state write stays in ordercore.Transition (hard constraint).
 func (d *DB) StaleSubmittedOrders(ctx context.Context, olderThan time.Duration, limit int) ([]int64, error) {
+	cutoff := time.Now().Add(-olderThan)
 	rows, err := d.Pool.Query(ctx,
-		`SELECT id FROM orders WHERE state='SUBMITTED' AND updated_at < now()-make_interval(secs=>$1) LIMIT $2`, olderThan.Seconds(), limit)
+		`SELECT id FROM orders WHERE state='SUBMITTED' AND updated_at < $1 LIMIT $2`, cutoff, limit)
 	if err != nil {
 		return nil, err
 	}

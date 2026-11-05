@@ -24,18 +24,20 @@ defmodule JobWorker.Jobs do
   def retry(conn, %{id: id, attempts: attempts}) do
     # exponential backoff: 2^attempts seconds
     backoff_s = :math.pow(2, attempts) |> trunc()
+    run_after = DateTime.add(DateTime.utc_now(), backoff_s, :second)
     Postgrex.query!(conn, """
-      UPDATE jobs SET state='PENDING', run_after=now()+ ($1 || ' seconds')::interval, updated_at=now()
+      UPDATE jobs SET state='PENDING', run_after=$1, updated_at=now()
       WHERE id=$2
-     """, [Integer.to_string(backoff_s), id])
+     """, [run_after, id])
   end
 
   def stale_submitted(conn, older_than_s, limit) do
+    cutoff = DateTime.add(DateTime.utc_now(), -older_than_s, :second)
     %{rows: rows} = Postgrex.query!(conn, """
       SELECT id FROM orders
-      WHERE state='SUBMITTED' AND updated_at < now() - ($1 || ' seconds')::interval
+      WHERE state='SUBMITTED' AND updated_at < $1
       LIMIT $2
-     """, [Integer.to_string(older_than_s), limit])
+     """, [cutoff, limit])
     Enum.map(rows, &hd/1)
   end
 end
