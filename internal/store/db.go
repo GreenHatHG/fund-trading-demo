@@ -65,8 +65,15 @@ func (d *DB) GetOrder(ctx context.Context, id string) (*Order, error) {
 // InsertOrder writes a CREATED order. Unique index on (user_id, idempotency_key)
 // is the real dedup; ErrDuplicate maps pg's 23505.
 func (d *DB) InsertOrder(ctx context.Context, userID, idemKey, fundCode, direction, amount, requestID string, tradingDay time.Time, confirmDate *time.Time) (*Order, error) {
+	// One transaction: order row and its event must live or die together.
+	tx, err := d.Pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
 	var o Order
-	err := d.Pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`INSERT INTO orders (user_id,idempotency_key,fund_code,direction,amount,state,trading_day,confirm_date)
 		 VALUES ($1,$2,$3,$4,$5,'CREATED',$6,$7)
 		 ON CONFLICT (user_id, idempotency_key) DO NOTHING
@@ -79,9 +86,12 @@ func (d *DB) InsertOrder(ctx context.Context, userID, idemKey, fundCode, directi
 	if err != nil {
 		return nil, err
 	}
-	_, err = d.Pool.Exec(ctx,
+	_, err = tx.Exec(ctx,
 		`INSERT INTO order_events (order_id, event_type, payload, request_id) VALUES ($1,'ORDER_CREATED','{}',$2)`, o.ID, requestID)
 	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return &o, nil
