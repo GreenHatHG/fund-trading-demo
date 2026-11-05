@@ -1,11 +1,14 @@
 defmodule JobWorker.Repo do
   @moduledoc """
-  Thin Postgrex wrapper over the same DB the Go services use.
-  DSN: postgres://fund:fund@localhost:5432/fund (override with DATABASE_URL).
+  Postgrex connection pool over the same DB the Go services use.
+  The pool pid is stored in :persistent_term so Poller can grab it without a
+  GenServer hop. DSN: postgres://fund:fund@localhost:5432/fund (override with
+  DATABASE_URL).
   """
   use GenServer
 
   @pool_size 5
+  @key :job_worker_repo_pool
 
   def start_link(_opts) do
     GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
@@ -13,15 +16,18 @@ defmodule JobWorker.Repo do
 
   @impl true
   def init(:ok) do
-    {:ok, conn} = Postgrex.start_link(
+    {:ok, pool} = Postgrex.start_link(
       hostname: hostname(),
       username: "fund",
       password: "fund",
       database: "fund",
       port: 5432,
-      pool_size: @pool_size
+      pool_size: @pool_size,
+      # Pool checkout must not outlive the caller's own timeout below.
+      timeout: 15_000
     )
-    {:ok, conn}
+    :persistent_term.put(@key, pool)
+    {:ok, pool}
   end
 
   defp hostname do
@@ -36,13 +42,11 @@ defmodule JobWorker.Repo do
     end
   end
 
-  @doc "Run a query against the shared pool."
-  def query!(sql, params \\ []) do
-    GenServer.call(__MODULE__, {:query, sql, params}, 15_000)
-  end
+  @doc "The shared pool pid; pass it anywhere Postgrex expects a conn."
+  def pool, do: :persistent_term.get(@key)
 
-  @impl true
-  def handle_call({:query, sql, params}, _from, conn) do
-    {:reply, Postgrex.query(conn, sql, params), conn}
+  @doc "Run a query on the shared pool (checks out a connection per call)."
+  def query!(sql, params \\ []) do
+    Postgrex.query!(pool(), sql, params)
   end
 end

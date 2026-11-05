@@ -15,23 +15,23 @@ defmodule JobWorker.Poller do
 
   @impl true
   def init(_opts) do
-    # Reach into the pool process to grab the raw Postgrex conn for transactions.
-    # (Single-node demo shortcut; a real app would share a connection pool.)
-    conn = :sys.get_state(JobWorker.Repo)
+    # Always read the live pool via Repo.pool(); a cached pid would die on a
+    # pool restart. Never store the pool in GenServer state.
     schedule()
-    {:ok, conn}
+    {:ok, nil}
   end
 
   @impl true
-  def handle_info(:tick, conn) do
-    run_once(conn)
+  def handle_info(:tick, state) do
+    run_once()
     schedule()
-    {:noreply, conn}
+    {:noreply, state}
   end
 
   defp schedule, do: Process.send_after(self(), :tick, @tick)
 
-  defp run_once(conn) do
+  defp run_once do
+    conn = JobWorker.Repo.pool()
     # Sweep first so an idle queue still advances stale SUBMITTED orders.
     sweep_stale(conn)
 
@@ -62,7 +62,6 @@ defmodule JobWorker.Poller do
     end
   end
 
-  # RECONCILE jobs belong to the reconciliation component; no-op here.
   defp dispatch(conn, %{type: "RECONCILE"} = job), do: JobWorker.Jobs.finish(conn, job.id)
 
   defp sweep_stale(conn) do

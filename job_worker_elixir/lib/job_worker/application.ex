@@ -4,7 +4,7 @@ defmodule JobWorker.Application do
 
   @impl true
   def start(_type, _args) do
-    # Start the pool first; the poller needs the raw conn for transactions.
+    # Pool pid lands in :persistent_term at Repo init; Poller reads it after.
     children = [
       JobWorker.Repo,
       {Task.Supervisor, name: JobWorker.TaskSupervisor},
