@@ -63,3 +63,4 @@ curl -s -X POST localhost:8090/__control -d '{"fund_code":"000001","direction":"
 - Keep changes scoped to the task. No speculative abstractions, no drive-by refactors.
 - Comments only on lines with real traps ("why", not "what").
 - Tests: behavior only, P0 paths only (data loss, state corruption, crash).
+- Elixir : keep nesting shallow. Prefer `with` + small private helpers over `if`/`case` inside closures; one level of abstraction per function. No `|> case do` chained onto a multi-level block. Avoid long positional arg lists where a keyword list or pattern-matched function heads read better. Run `mix compile --warnings-as-errors` before claiming done.

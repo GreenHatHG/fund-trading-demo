@@ -13,12 +13,14 @@ defmodule JobWorker.Submitter do
 
   defp fetch_order(conn, order_id) do
     case Postgrex.query!(conn, """
-          SELECT id, state, fund_code, direction, amount FROM orders WHERE id=$1
+          SELECT id, state, fund_code, direction, amount, version FROM orders WHERE id=$1
          """, [order_id]) do
       %{num_rows: 0} -> :skip
-      %{rows: [[id, state, fund, dir, amount]]} ->
+      %{rows: [[id, state, fund, dir, amount, version]]} ->
         # Idempotent handler: only CREATED orders move; re-delivery is a no-op.
-        if state == "CREATED", do: {:ok, %{id: id, fund: fund, dir: dir, amount: amount}}, else: :skip
+        if state == "CREATED",
+          do: {:ok, %{id: id, fund: fund, dir: dir, amount: amount, version: version}},
+          else: :skip
     end
   end
 
@@ -37,20 +39,20 @@ defmodule JobWorker.Submitter do
   defp handle_result(conn, order, request_id, {:ok, {{_, 200, _}, _, resp_body}}) do
     %{"status" => status} = Jason.decode!(to_string(resp_body))
     case status do
-      "ACCEPTED" -> trans(conn, order.id, :created, :submitted, "SUBMITTED", request_id)
-      "REJECTED" -> trans(conn, order.id, :created, :failed, "REJECTED", request_id)
-      _ -> trans(conn, order.id, :created, :unknown, "UNEXPECTED_RESPONSE", request_id)
+      "ACCEPTED" -> trans(conn, order, :created, :submitted, "SUBMITTED", request_id)
+      "REJECTED" -> trans(conn, order, :created, :failed, "REJECTED", request_id)
+      _ -> trans(conn, order, :created, :unknown, "UNEXPECTED_RESPONSE", request_id)
     end
   end
 
   # Timeout or transport error: result is UNKNOWN, never FAILED.
   defp handle_result(conn, order, request_id, {:error, _reason}) do
     IO.warn("downstream timeout, order -> UNKNOWN (#{order.id})")
-    trans(conn, order.id, :created, :unknown, "DOWNSTREAM_TIMEOUT", request_id)
+    trans(conn, order, :created, :unknown, "DOWNSTREAM_TIMEOUT", request_id)
   end
 
-  defp trans(conn, order_id, from, to, event, request_id) do
-    case JobWorker.OrderCore.transition(conn, order_id, from, to, event, request_id) do
+  defp trans(conn, order, from, to, event, request_id) do
+    case JobWorker.OrderCore.transition(conn, order.id, from, to, event, request_id, order.version) do
       :ok -> :ok
       {:error, :conflict} -> :ok  # someone else moved it; fine under at-least-once
       {:error, reason} -> {:error, reason}

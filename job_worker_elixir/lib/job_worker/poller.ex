@@ -10,6 +10,8 @@ defmodule JobWorker.Poller do
   @tick 200
   @batch 10
   @sweep_after_s 5
+  @stale_running_s 30
+  @enqueue_batch 100
 
   def start_link(_opts), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
 
@@ -34,6 +36,10 @@ defmodule JobWorker.Poller do
     conn = JobWorker.Repo.pool()
     # Sweep first so an idle queue still advances stale SUBMITTED orders.
     sweep_stale(conn)
+    # Fill the queue before claiming so freshly CREATED orders are seen,
+    # and unstick jobs orphaned in RUNNING by a crashed worker.
+    enqueue_submits(conn)
+    requeue_stale_running(conn)
 
     for _ <- 1..@batch do
       case JobWorker.Jobs.claim_next(conn) do
@@ -64,10 +70,25 @@ defmodule JobWorker.Poller do
 
   defp dispatch(conn, %{type: "RECONCILE"} = job), do: JobWorker.Jobs.finish(conn, job.id)
 
+  defp enqueue_submits(conn) do
+    JobWorker.Jobs.enqueue_submits(conn, @enqueue_batch)
+  rescue
+    e -> Logger.warning("enqueue submits: #{Exception.message(e)}")
+  end
+
+  defp requeue_stale_running(conn) do
+    case JobWorker.Jobs.requeue_stale_running(conn, @stale_running_s) do
+      0 -> :ok
+      n -> Logger.warning("requeued #{n} stale RUNNING job(s)")
+    end
+  rescue
+    e -> Logger.warning("requeue stale running: #{Exception.message(e)}")
+  end
+
   defp sweep_stale(conn) do
     ids = JobWorker.Jobs.stale_submitted(conn, @sweep_after_s, 100)
-    for id <- ids do
-      case JobWorker.OrderCore.transition(conn, id, :submitted, :unknown, "TIMEOUT_SWEEP", "sweep") do
+    for [id, version] <- ids do
+      case JobWorker.OrderCore.transition(conn, id, :submitted, :unknown, "TIMEOUT_SWEEP", "sweep", version) do
         :ok -> :ok
         {:error, :conflict} -> :ok
         {:error, reason} -> Logger.warning("sweep #{id}: #{inspect(reason)}")

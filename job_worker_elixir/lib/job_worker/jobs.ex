@@ -1,5 +1,32 @@
 defmodule JobWorker.Jobs do
-  @moduledoc "Job queue access: claim (SKIP LOCKED), finish, retry with backoff."
+  @moduledoc """
+  Job queue access: enqueue SUBMIT for CREATED orders, claim (SKIP LOCKED),
+  finish, retry with backoff.
+  """
+
+  # Producer loop: one active SUBMIT job per CREATED order. Submitter is
+  # idempotent (only CREATED orders move), so at-least-once enqueue is safe.
+  def enqueue_submits(conn, limit) do
+    %{num_rows: n} = Postgrex.query!(conn, """
+      INSERT INTO jobs (order_id, job_type, state)
+      SELECT id, 'SUBMIT', 'PENDING' FROM orders
+      WHERE state='CREATED'
+      ORDER BY id LIMIT $1
+      ON CONFLICT (order_id) WHERE state IN ('PENDING','RUNNING') DO NOTHING
+     """, [limit])
+    n
+  end
+
+  # A worker crash leaves jobs RUNNING forever, and the active-index then
+  # blocks re-enqueue for that order. Requeue stale RUNNING so it can retry.
+  def requeue_stale_running(conn, older_than_s) do
+    cutoff = DateTime.add(DateTime.utc_now(), -older_than_s, :second)
+    %{num_rows: n} = Postgrex.query!(conn, """
+      UPDATE jobs SET state='PENDING', updated_at=now()
+      WHERE state='RUNNING' AND updated_at < $1
+     """, [cutoff])
+    n
+  end
 
   def claim_next(conn) do
     case Postgrex.query!(conn, """
@@ -34,10 +61,10 @@ defmodule JobWorker.Jobs do
   def stale_submitted(conn, older_than_s, limit) do
     cutoff = DateTime.add(DateTime.utc_now(), -older_than_s, :second)
     %{rows: rows} = Postgrex.query!(conn, """
-      SELECT id FROM orders
+      SELECT id, version FROM orders
       WHERE state='SUBMITTED' AND updated_at < $1
       LIMIT $2
      """, [cutoff, limit])
-    Enum.map(rows, &hd/1)
+    rows
   end
 end
