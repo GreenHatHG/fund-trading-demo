@@ -1,4 +1,6 @@
--- schema.sql — run at startup by any Go service (idempotent).
+-- schema.sql — run at startup by any service (idempotent).
+-- Job types: only SUBMIT. Reconciliation is a standalone poller (Go),
+-- it never goes through the jobs table.
 CREATE TABLE IF NOT EXISTS orders (
     id             BIGSERIAL PRIMARY KEY,
     user_id        TEXT NOT NULL,
@@ -29,7 +31,7 @@ CREATE INDEX IF NOT EXISTS order_events_order_idx ON order_events (order_id);
 CREATE TABLE IF NOT EXISTS jobs (
     id          BIGSERIAL PRIMARY KEY,
     order_id    BIGINT NOT NULL REFERENCES orders(id),
-    job_type    TEXT NOT NULL CHECK (job_type IN ('SUBMIT','RECONCILE')),
+    job_type    TEXT NOT NULL CHECK (job_type IN ('SUBMIT')),
     state       TEXT NOT NULL CHECK (state IN ('PENDING','RUNNING','DONE','DEAD')),
     attempts    INT NOT NULL DEFAULT 0,
     max_attempts INT NOT NULL DEFAULT 5,
