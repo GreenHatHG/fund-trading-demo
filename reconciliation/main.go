@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/jooooody0710/fund-trading-demo/internal/ordercore"
@@ -62,20 +63,27 @@ func reconcileOnce(ctx context.Context, db *store.DB, mockURL string, client *ht
 	rows.Close()
 
 	for _, p := range unknowns {
-		resp, err := client.Get(mockURL + "/query/" + itoa(p.id))
+		resp, err := client.Get(mockURL + "/query/" + strconv.FormatInt(p.id, 10))
 		if err != nil {
 			log.Warn("reconcile query failed, will retry next tick", "order_id", p.id, "err", err)
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			// Non-200 means the answer is not trustworthy; leave UNKNOWN for the next tick.
+			resp.Body.Close()
+			log.Warn("reconcile query bad status", "order_id", p.id, "status", resp.StatusCode)
 			continue
 		}
 		var out struct {
 			Status string `json:"status"`
 			Reason string `json:"reason"`
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-			resp.Body.Close()
+		decodeErr := json.NewDecoder(resp.Body).Decode(&out)
+		resp.Body.Close()
+		if decodeErr != nil {
+			log.Warn("reconcile query bad body", "order_id", p.id, "err", decodeErr)
 			continue
 		}
-		resp.Body.Close()
 		switch out.Status {
 		case "ACCEPTED":
 			if err := ordercore.Transition(ctx, db.Pool, p.id, ordercore.Unknown, ordercore.Confirmed, "RECONCILED_ACCEPTED", "reconcile", "{}"); err != nil {
@@ -99,14 +107,3 @@ func reconcileOnce(ctx context.Context, db *store.DB, mockURL string, client *ht
 	}
 }
 
-func itoa(n int64) string {
-	b := []byte{}
-	if n == 0 {
-		return "0"
-	}
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	return string(b)
-}
