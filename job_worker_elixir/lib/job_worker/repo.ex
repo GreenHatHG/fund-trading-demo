@@ -7,7 +7,7 @@ defmodule JobWorker.Repo do
   """
   use GenServer
 
-  @pool_size 5
+  @default_pool_size 5
   @key :job_worker_repo_pool
 
   def start_link(_opts) do
@@ -22,12 +22,20 @@ defmodule JobWorker.Repo do
       password: "fund",
       database: "fund",
       port: 5432,
-      pool_size: @pool_size,
+      # Pool size must cover the Poller's batch concurrency or tasks queue here.
+      pool_size: pool_size(),
       # Pool checkout must not outlive the caller's own timeout below.
       timeout: 15_000
     )
     :persistent_term.put(@key, pool)
     {:ok, pool}
+  end
+
+  defp pool_size do
+    case System.get_env("POOL_SIZE") do
+      nil -> @default_pool_size
+      s -> String.to_integer(s)
+    end
   end
 
   defp hostname do

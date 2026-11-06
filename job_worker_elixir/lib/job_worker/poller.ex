@@ -41,34 +41,53 @@ defmodule JobWorker.Poller do
     enqueue_submits(conn)
     requeue_stale_running(conn)
 
-    for _ <- 1..@batch do
-      case JobWorker.Jobs.claim_next(conn) do
-        :empty -> :done
-        {:ok, job} -> dispatch(conn, job)
+    # Fire the whole batch, then collect: a slow submit no longer serializes
+    # the rest of the batch behind it.
+    submits =
+      for _ <- 1..@batch do
+        case JobWorker.Jobs.claim_next(conn) do
+          :empty -> nil
+          {:ok, job} -> job
+        end
       end
-    end
+      |> Enum.reject(&is_nil/1)
+
+    collect(conn, Enum.map(submits, fn job -> {job, dispatch(job)} end))
   end
 
-  defp dispatch(conn, %{type: "SUBMIT"} = job) do
+  defp dispatch(%{type: "SUBMIT"} = job) do
     request_id = "job-submit-#{job.order_id}"
-    task = Task.Supervisor.async_nolink(JobWorker.TaskSupervisor, fn ->
-      JobWorker.Submitter.run(conn, job.order_id, request_id)
+    # Submitter takes the pool pid; Postgrex checks out a connection per
+    # query, so concurrent tasks only queue on the pool — safe.
+    Task.Supervisor.async_nolink(JobWorker.TaskSupervisor, fn ->
+      JobWorker.Submitter.run(JobWorker.Repo.pool(), job.order_id, request_id)
     end)
-
-    case Task.yield(task, 5_000) || Task.shutdown(task, :brutal_kill) do
-      {:ok, :ok} -> JobWorker.Jobs.finish(conn, job.id)
-      {:ok, {:error, reason}} ->
-        Logger.warning("job #{job.id} failed: #{inspect(reason)}")
-        JobWorker.Jobs.retry(conn, job)
-      {:ok, :skip} -> JobWorker.Jobs.finish(conn, job.id)
-      nil -> JobWorker.Jobs.retry(conn, job)  # timed out hard
-      {:exit, reason} ->
-        Logger.warning("job #{job.id} crashed: #{inspect(reason)}")
-        JobWorker.Jobs.retry(conn, job)
-    end
   end
 
-  defp dispatch(conn, %{type: "RECONCILE"} = job), do: JobWorker.Jobs.finish(conn, job.id)
+  defp collect(_conn, []), do: :ok
+
+  defp collect(conn, tasks) do
+    # yield_many returns [{task, result}] pairs; map each back to its job.
+    job_of = Map.new(tasks, fn {j, t} -> {t.ref, j} end)
+
+    tasks
+    |> Enum.map(fn {_, t} -> t end)
+    |> Task.yield_many(5_000)
+    |> Enum.each(fn {task, result} ->
+      job = Map.fetch!(job_of, task.ref)
+      case result || Task.shutdown(task, :brutal_kill) do
+        {:ok, :ok} -> JobWorker.Jobs.finish(conn, job.id)
+        {:ok, {:error, reason}} ->
+          Logger.warning("job #{job.id} failed: #{inspect(reason)}")
+          JobWorker.Jobs.retry(conn, job)
+        {:ok, :skip} -> JobWorker.Jobs.finish(conn, job.id)
+        nil -> JobWorker.Jobs.retry(conn, job)  # timed out hard
+        {:exit, reason} ->
+          Logger.warning("job #{job.id} crashed: #{inspect(reason)}")
+          JobWorker.Jobs.retry(conn, job)
+      end
+    end)
+  end
 
   defp enqueue_submits(conn) do
     JobWorker.Jobs.enqueue_submits(conn, @enqueue_batch)
