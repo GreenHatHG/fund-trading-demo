@@ -27,6 +27,7 @@ type mock struct {
 	mu      sync.Mutex
 	modes   map[string]mode
 	results map[string]map[string]any
+	submits map[string]int // order_id -> count of completed submissions (test-only)
 }
 
 // decide picks the outcome: explicit mode if set, else 70% success / 20% fail / 10% timeout.
@@ -74,6 +75,10 @@ func (m *mock) handleSubmit(w http.ResponseWriter, r *http.Request, _ httprouter
 		return // caller gave up: this is the timeout path
 	}
 
+	m.mu.Lock()
+	m.submits[idKey(req.OrderID)]++
+	m.mu.Unlock()
+
 	switch mo {
 	case modeSuccess:
 		res := map[string]any{"status": "ACCEPTED", "order_id": req.OrderID}
@@ -116,7 +121,12 @@ func (m *mock) handleQuery(w http.ResponseWriter, r *http.Request, ps httprouter
 	id := ps.ByName("orderId")
 	m.mu.Lock()
 	res, ok := m.results[id]
+	submits := m.submits[id]
 	m.mu.Unlock()
+	if r.URL.Query().Get("stats") == "1" {
+		writeJSON(w, 200, map[string]any{"submits": submits})
+		return
+	}
 	if !ok {
 		writeJSON(w, 200, map[string]any{"status": "UNKNOWN"})
 		return
@@ -137,7 +147,7 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 func main() {
-	m := &mock{modes: map[string]mode{}, results: map[string]map[string]any{}}
+	m := &mock{modes: map[string]mode{}, results: map[string]map[string]any{}, submits: map[string]int{}}
 	r := httprouter.New()
 	r.POST("/submit", m.handleSubmit)
 	r.POST("/__control", m.handleControl)
